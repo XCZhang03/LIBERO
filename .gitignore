@@ -16,3 +16,7 @@ logs/
 *.mp4
 libero.egg-info/
 .vscode/
+
+*.png
+dataset*/
+test*
