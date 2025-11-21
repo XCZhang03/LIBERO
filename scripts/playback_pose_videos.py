@@ -70,6 +70,7 @@ import numpy as np
 import random
 
 from pathlib import Path
+import multiprocessing as mp
 import robosuite
 import robosuite.utils.transform_utils as T
 import robosuite.macros as macros
@@ -81,7 +82,102 @@ from robosuite.utils import camera_utils
 from libero.libero.envs import *
 from libero.libero import get_libero_path
 
+# Ensure safe multiprocessing and reduce thread oversubscription early
+try:
+    mp.set_start_method("spawn", force=True)  # avoid fork with OpenGL / imageio backends
+except RuntimeError:
+    pass
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+try:
+    import cv2
+    cv2.setNumThreads(1)
+except Exception:
+    pass
 
+
+class VideoWriterManager:
+    """Context manager to handle imageio video writers using temporary files
+    and atomic rename on close. Ensures corresponding pose and video files
+    are finalized together and cleans up stale .tmp files.
+    """
+    def __init__(self, video_dir, camera_names, seg_idx, res=128, fps=20):
+        self.video_dir = video_dir
+        self.camera_names = camera_names
+        self.seg_idx = seg_idx
+        self.res = res
+        self.fps = fps
+
+        self.video_writers = {}
+        self.pose_video_writers = {}
+
+        self.video_tmp_paths = {}
+        self.video_final_paths = {}
+        self.pose_tmp_paths = {}
+        self.pose_final_paths = {}
+
+    def __enter__(self):
+        # Open writers for cameras whose final files don't already exist.
+        for camera_name in self.camera_names:
+            camera_video_final = os.path.join(self.video_dir, f"{camera_name}_seg{self.seg_idx}.mp4")
+            base, ext = os.path.splitext(camera_video_final)
+            camera_video_tmp = f"{base}.tmp{ext}"  # ensure plugin sees .mp4 extension
+            # Skip if final already exists (finals are only created on successful close)
+            if os.path.exists(camera_video_final):
+                continue
+            # Remove stale tmp if present
+            if os.path.exists(camera_video_tmp):
+                os.remove(camera_video_tmp)
+            # create writer to tmp file
+            self.video_writers[camera_name] = imageio.get_writer(camera_video_tmp, fps=self.fps)
+            self.video_tmp_paths[camera_name] = camera_video_tmp
+            self.video_final_paths[camera_name] = camera_video_final
+
+            if 'robot' not in camera_name:
+                pose_video_final = os.path.join(self.video_dir, f"{camera_name}_seg{self.seg_idx}_pose.mp4")
+                pbase, pext = os.path.splitext(pose_video_final)
+                pose_video_tmp = f"{pbase}.tmp{pext}"
+                # Skip if final already exists
+                if os.path.exists(pose_video_final):
+                    continue
+                if os.path.exists(pose_video_tmp):
+                    os.remove(pose_video_tmp)
+                self.pose_video_writers[camera_name] = imageio.get_writer(pose_video_tmp, fps=self.fps)
+                self.pose_tmp_paths[camera_name] = pose_video_tmp
+                self.pose_final_paths[camera_name] = pose_video_final
+
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Finalize per-camera: close writers then atomically rename their tmp files
+        cams_to_finalize = set()
+        cams_to_finalize.update(self.video_tmp_paths.keys())
+        cams_to_finalize.update(self.pose_tmp_paths.keys())
+
+        for cam_name in cams_to_finalize:
+            vw = self.video_writers.get(cam_name)
+            pw = self.pose_video_writers.get(cam_name)
+            if vw is not None:
+                vw.close()
+            if pw is not None:
+                pw.close()
+
+            v_tmp = self.video_tmp_paths.get(cam_name)
+            v_final = self.video_final_paths.get(cam_name)
+            p_tmp = self.pose_tmp_paths.get(cam_name)
+            p_final = self.pose_final_paths.get(cam_name)
+
+            # Rename video then pose
+            if v_tmp and v_final and os.path.exists(v_tmp):
+                os.replace(v_tmp, v_final)
+            if p_tmp and p_final and os.path.exists(p_tmp):
+                os.replace(p_tmp, p_final)
+
+        # Cleanup any leftover tmp files
+        for tmp_path in list(self.video_tmp_paths.values()) + list(self.pose_tmp_paths.values()):
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper_only=False, min_len: int=40):
     if noise == 0:
@@ -100,7 +196,7 @@ def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper
         actions[noising_start:, gripper_index] = actions[noising_start:, gripper_index] * ((np.random.rand(traj_len - noising_start, len(gripper_index)) > noise).astype(np.float32) * 2 - 1)
     gaussian_noise = np.random.normal(0, noise, actions.shape) if not gripper_only else np.zeros_like(actions)
     actions[noising_start:] += gaussian_noise[noising_start:]
-    action_low, action_high = env.env.action_spec
+    action_low, action_high = env.action_spec
     actions = np.clip(actions, action_low, action_high)
     actions = actions[noising_start:]
     states = states[noising_start:]
@@ -165,6 +261,7 @@ def playback_trajectory_with_env(
     ## removing for now
     env.sim.reset()
     env.sim.set_state_from_flattened(initial_state)
+    env.sim.forward()
     empty_env.copy_robot_state(env)
 
     # update camera_names for available cameras
@@ -179,7 +276,7 @@ def playback_trajectory_with_env(
 
     for i in range(traj_len):
         if action_playback:
-            env.step(actions[i])
+            obs, reward, done, info = env.step(actions[i])
             empty_env.step(actions[i])
             # if i < traj_len - 1:
             #     # check whether the actions deterministically lead to the same recorded states
@@ -199,12 +296,12 @@ def playback_trajectory_with_env(
         if write_video:
             if video_count % video_skip == 0:
                 for cam_name in camera_names:
-                    video_img = env.sim.render(height=res, width=res, camera_name=cam_name)[::-1]
-                    video_writers[cam_name].append_data(video_img)
+                    video_img = obs[cam_name + "_image"][::-1]
+                    video_writers[cam_name].append_data(video_img.copy())
                     if 'robot' not in cam_name:
                         cam_transform = empty_env.get_camera_transform(camera_name=cam_name, camera_height=res, camera_width=res)
                         pose_image = empty_env.plot_pose(cam_transform, height=res, width=res)
-                        pose_video_writers[cam_name].append_data(pose_image)
+                        pose_video_writers[cam_name].append_data(pose_image.copy())
             video_count += 1
             if video_count % action_chunk == 0:
                 empty_env.copy_robot_state(env)
@@ -221,10 +318,9 @@ def playback_dataset(args):
     if args.video_path is None:
         # args.video_path = os.path.dirname(args.dataset)
         # Find the relative path of args.dataset to ./dataset
-        dataset_dir = Path("./datasets")
-        video_dir = str(dataset_dir) + f"_std_{args.noise}" + f"_{args.res}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper_only else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
+        video_dir = args.dataset_dir + f"_std_{args.noise}" + f"_{args.res}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper_only else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
             + (f"_eval" if args.eval else "")
-        rel_dataset_path = os.path.relpath(args.dataset, str(dataset_dir))
+        rel_dataset_path = os.path.relpath(args.dataset, args.dataset_dir)
         rel_dataset_path = os.path.splitext(rel_dataset_path)[0]
         print(f"Relative dataset path: {rel_dataset_path}")
         args.video_path = os.path.join(video_dir, rel_dataset_path)
@@ -232,16 +328,6 @@ def playback_dataset(args):
     write_video = (args.video_path is not None)
     assert not (args.render and write_video) # either on-screen or video but not both
 
-    if args.render:
-        # on-screen rendering can only support one camera
-        assert len(args.render_image_names) == 1
-
-    if args.use_obs:
-        assert write_video, "playback with observations can only write to video"
-        assert not args.use_actions, "playback with observations is offline and does not support action playback"
-
-    if args.render_depth_names is not None:
-        assert args.use_obs, "depth observations can only be visualized from observations currently"
 
     env_name = f["data"].attrs["env_name"]
 
@@ -268,13 +354,18 @@ def playback_dataset(args):
             camera_names=args.render_image_names,
             reward_shaping=True,
             control_freq=20,
-            camera_heights=128,
-            camera_widths=128,
+            camera_heights=args.res,
+            camera_widths=args.res,
             camera_segmentations=None,
     )
-    env = TASK_MAPPING[problem_name](
-            **env_kwargs,
-        )
+    env = OffScreenRenderEnv(
+        bddl_file_name=bddl_file_name,
+        camera_names=args.render_image_names,
+        camera_heights=args.res,
+        camera_widths=args.res,
+        ignore_done=True,
+        hard_reset=False,
+    ).env
     
     empty_env_kwargs = env_kwargs.copy()
     empty_env_kwargs['robots'] = [type(robot.robot_model).__name__ for robot in env.robots]
@@ -321,52 +412,40 @@ def playback_dataset(args):
             json.dump(vars(args), f_args, indent=4)
 
         for i, (seg_states, seg_actions) in enumerate(split_trajectory(args, states, actions)):
+            # Use the VideoWriterManager to encapsulate writer lifecycle and atomic moves
+            with VideoWriterManager(video_dir, args.render_image_names, i, res=args.res, fps=20) as vwm:
+                video_writers = vwm.video_writers
+                pose_video_writers = vwm.pose_video_writers
 
-            # maybe dump video
-            if write_video:
-                video_writers = {}
-                pose_video_writers = {}
-                for camera_name in args.render_image_names:
-                    camera_video_path = os.path.join(video_dir, f"{camera_name}_seg{i}.mp4")
-                    if os.path.exists(camera_video_path):
-                        # print(f"skipping camera {camera_name}", flush=True)
-                        continue
-                    video_writers[camera_name] = imageio.get_writer(camera_video_path, fps=20)
-                    if 'robot' not in camera_name:
-                        pose_video_path = os.path.join(video_dir, f"{camera_name}_seg{i}_pose.mp4")
-                        pose_video_writers[camera_name] = imageio.get_writer(pose_video_path, fps=20)
+                camera_names = list(set(env.sim.model.camera_names).intersection(empty_env.sim.model.camera_names).intersection(set(args.render_image_names)).intersection(set(video_writers.keys())))
+                if len(camera_names) == 0:
+                    # context exit will finalize/cleanup writers
+                    continue
 
-            camera_names = list(set(env.sim.model.camera_names).intersection(empty_env.sim.model.camera_names).intersection(set(args.render_image_names)).intersection(set(video_writers.keys())))
-            if len(camera_names) == 0:
-                continue
+                noised_states, noised_actions = noise_fn(seg_states, seg_actions, args.noise, env, gripper_only=args.gripper_only, min_len=(80 if args.traj_len is None else None))
 
-            noised_states, noised_actions = noise_fn(seg_states, seg_actions, args.noise, env, gripper_only=args.gripper_only, min_len=None)
+                print(f"Playing back seg{i} of episode: {ep} of env {rel_dataset_path} with length {len(noised_states)}", flush=True)
 
-            print(f"Playing back seg{i} of episode: {ep} of env {rel_dataset_path} with length {len(noised_states)}", flush=True)
-
-            initial_state = noised_states[0]
-           
-            playback_trajectory_with_env(
-                env=env, 
-                empty_env=empty_env,
-                initial_state=initial_state, 
-                states=noised_states, actions=noised_actions, 
-                render=args.render, 
-                video_writers=video_writers, 
-                pose_video_writers=pose_video_writers,
-                video_skip=args.video_skip,
-                camera_names=camera_names,
-                first=args.first,
-                res=args.res,
-                action_chunk=args.action_chunk,
-            )
-            if write_video:
-                for video_writer in video_writers.values():
-                    video_writer.close()
-                for pose_video_writer in pose_video_writers.values():
-                    pose_video_writer.close()
-    
+                initial_state = noised_states[0]
+                
+                playback_trajectory_with_env(
+                    env=env, 
+                    empty_env=empty_env,
+                    initial_state=initial_state, 
+                    states=noised_states, actions=noised_actions, 
+                    render=args.render, 
+                    video_writers=video_writers, 
+                    pose_video_writers=pose_video_writers,
+                    video_skip=args.video_skip,
+                    camera_names=camera_names,
+                    first=args.first,
+                    res=args.res,
+                    action_chunk=args.action_chunk,
+                )
+                # context manager __exit__ will finalize and cleanup
     f.close()
+    del env
+    del empty_env
     
         
 
@@ -492,34 +571,23 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    args.dataset = "/datapool/data2/home/linhw/zhangxiangcheng/DiffRL/libero_dataset/LIBERO/datasets/KITCHEN_SCENE5_close_the_top_drawer_of_the_cabinet_demo.hdf5"
+    args.dataset_dir = "/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/DiffRL/libero_dataset/LIBERO/libero/datasets/libero_90"
     if args.action_chunk is None:
         args.action_chunk = args.video_skip
-    if args.dataset == 'all':
-        import threading
+    if not os.path.exists(args.dataset):
         import multiprocessing as mp
-        from robomimic.scripts.download_datasets import DATASET_REGISTRY
-        default_base_dir = os.path.join(robomimic.__path__[0], "../datasets")
         tasks = []
-        for task in DATASET_REGISTRY:
-            for dataset_type in DATASET_REGISTRY[task]:
-                download_dir = os.path.abspath(os.path.join(default_base_dir, task, dataset_type))
-                if not os.path.exists(download_dir):
-                    continue
-                for file in os.listdir(download_dir):
-                    if file.endswith(".hdf5"):
-                        from copy import deepcopy
-                        cur_args = deepcopy(args)
-                        cur_args.dataset = os.path.join(download_dir, file)
-                        cur_args.video_path = None
-                        tasks.append(cur_args)
-
-        def worker(task_args):
-            playback_dataset(task_args)
+        for file in os.listdir(args.dataset_dir):
+            if file.endswith(".hdf5") and (args.dataset in file.lower() or args.dataset == "all"):
+                from copy import deepcopy
+                cur_args = deepcopy(args)
+                cur_args.dataset = os.path.join(args.dataset_dir, file)
+                cur_args.video_path = None
+                tasks.append(cur_args)
 
         processes = []
         for task_args in tasks:
-            p = mp.Process(target=worker, args=(task_args,))
+            p = mp.Process(target=playback_dataset, args=(task_args,))
             p.start()
             processes.append(p)
 

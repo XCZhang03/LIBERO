@@ -20,3 +20,5 @@ libero.egg-info/
 *.png
 dataset*/
 test*
+
+slurm*

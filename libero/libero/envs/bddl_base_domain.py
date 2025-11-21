@@ -839,7 +839,7 @@ class BDDLBaseDomain(SingleArmEnv):
 
     @property
     def language_instruction(self):
-        return self.parsed_problem["language"]
+        return self.parsed_problem["language_instruction"]
 
     def get_object(self, object_name):
         for query_dict in [
