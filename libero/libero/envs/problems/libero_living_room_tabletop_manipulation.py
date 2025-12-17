@@ -186,6 +186,7 @@ class Libero_Living_Room_Tabletop_Manipulation(BDDLBaseDomain):
                     )
 
     def _setup_camera(self, mujoco_arena):
+        super()._setup_camera(mujoco_arena)
         mujoco_arena.set_camera(
             camera_name="agentview",
             pos=[0.6065773716836134, 0.0, 0.96],
@@ -200,6 +201,9 @@ class Libero_Living_Room_Tabletop_Manipulation(BDDLBaseDomain):
         # For visualization purpose
         mujoco_arena.set_camera(
             camera_name="frontview", pos=[1.5, 0.0, 0.9], quat=[0.56, 0.43, 0.43, 0.56]
+        )
+        mujoco_arena.set_camera(
+            camera_name="sideview", pos=[-0.05651774593317116, 1.2761224129427358, 0.9879572214102434], quat=[0.009905065491771751, 0.006877963156909582, 0.5912228352893879, 0.806418094001364]
         )
         mujoco_arena.set_camera(
             camera_name="galleryview",

@@ -189,6 +189,7 @@ class Libero_Study_Tabletop_Manipulation(BDDLBaseDomain):
                     )
 
     def _setup_camera(self, mujoco_arena):
+        super()._setup_camera(mujoco_arena)
         mujoco_arena.set_camera(
             camera_name="agentview",
             pos=[0.4586131746834771, 0.0, 1.6103500240372423],
@@ -198,6 +199,11 @@ class Libero_Study_Tabletop_Manipulation(BDDLBaseDomain):
                 0.30484986305236816,
                 0.6380177736282349,
             ],
+        )
+        mujoco_arena.set_camera(
+            camera_name="birdview",
+            pos=[-0.1, 0.0, 2.1],
+            quat=[0.7071, 0.0, 0.0, 0.7071],
         )
 
         # For visualization purpose

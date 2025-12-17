@@ -185,6 +185,7 @@ class Libero_Tabletop_Manipulation(BDDLBaseDomain):
                     )
 
     def _setup_camera(self, mujoco_arena):
+        super()._setup_camera(mujoco_arena)
         mujoco_arena.set_camera(
             camera_name="agentview",
             pos=[0.6586131746834771, 0.0, 1.6103500240372423],

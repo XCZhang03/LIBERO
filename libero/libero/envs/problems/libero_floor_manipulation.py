@@ -182,6 +182,7 @@ class Libero_Floor_Manipulation(BDDLBaseDomain):
                     )
 
     def _setup_camera(self, mujoco_arena):
+        super()._setup_camera(mujoco_arena)
         mujoco_arena.set_camera(
             camera_name="agentview",
             pos=[0.8965773716836134, 5.216182733499864e-07, 0.65],

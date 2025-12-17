@@ -34,13 +34,13 @@ def get_object_instructions(object_attrs_dict):
             words = object_name.split("_")
             assert words[-1] == "region"
             region_name = words[-2]
-            actual_name = words[:-3][-1]
+            actual_name = " ".join(words[:-3])
             assert words[-3] in ['1', '2', '3', '4', '5']
             instruction = attr + " the " + region_name + " region of the " + actual_name
         else:
             words = object_name.split("_")
             assert words[-1] in ['1', '2', '3', '4', '5']
-            actual_name = words[:-1][-1]
+            actual_name = " ".join(words[:-1])
             if attr == "turnon":
                 attr = "turn on"
             instruction = attr + " the " + actual_name
@@ -153,6 +153,8 @@ def copy_slice(src_group, dst_group, slc):
             new_grp = dst_group.create_group(key)
             copy_slice(item, new_grp, slc)
 
+        assert key in dst_group, f"Failed to copy {key} from source to destination group."
+
 
 def main(args):
     
@@ -162,7 +164,7 @@ def main(args):
         problem_info = json.loads(f["data"].attrs["problem_info"])
         language_instruction = problem_info["language_instruction"]
         bddl_file_name = f["data"].attrs["bddl_file_name"]
-        print("Language Instruction:", language_instruction)
+        # print("Language Instruction:", language_instruction)
     
 
     env = ControlEnv(
@@ -179,7 +181,8 @@ def main(args):
         demos = list(f['data'].keys())
         inds = np.argsort([int(elem[5:]) for elem in demos])
         demos = [demos[i] for i in inds]
-
+        if "segment_data" in f:
+            del f["segment_data"]
         dst_grp = f.require_group("segment_data")
         
         # maybe reduce the number of demonstrations to playback
@@ -234,24 +237,49 @@ if __name__ == "__main__":
     dataset_dir = "/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/DiffRL/libero_dataset/LIBERO/libero/datasets/libero_90"
     if not os.path.exists(args.dataset):
         import multiprocessing as mp
+        from copy import deepcopy
+
+        # Build per-file argument list
         tasks = []
         for file in os.listdir(dataset_dir):
             if file.endswith(".hdf5") and (args.dataset in file.lower() or args.dataset == "all"):
-                from copy import deepcopy
                 cur_args = deepcopy(args)
                 cur_args.dataset = os.path.join(dataset_dir, file)
                 tasks.append(cur_args)
 
-        processes = []
-        for task_args in tasks:
-            p = mp.Process(target=main, args=(task_args,))
-            p.start()
-            processes.append(p)
+        if not tasks:
+            raise RuntimeError(f"No datasets matched pattern '{args.dataset}' in {dataset_dir}")
 
-        for p in processes:
-            p.join()
-        # for task_args in tasks:
-        #     main(task_args)
+        print(len(tasks), "datasets to process.")
+        print(mp.cpu_count(), "CPUs available.")
+
+        task_segment = 40
+
+        # Use a regular process pool (default start method, e.g. fork on Linux)
+        n_workers = min(mp.cpu_count(), task_segment, len(tasks))
+
+        def _worker(task_args):
+            try:
+                main(task_args)
+            except Exception as e:
+                print(f"Error processing {task_args.dataset}: {e}", flush=True)
+                raise
+
+        try:
+            for i in range(0, len(tasks), task_segment):
+                batch = tasks[i:min(i + task_segment, len(tasks))]
+                cur_workers = min(mp.cpu_count(), task_segment, len(batch))
+                with mp.Pool(processes=cur_workers) as pool:
+                    pool.map(_worker, batch)
+        except KeyboardInterrupt:
+            # Pool context will terminate workers on exit; re-raise to signal interrupt
+            raise
+
+        # Sanity check: verify all datasets now contain expected groups
+        for task_args in tasks:
+            with h5py.File(task_args.dataset, "r") as f:
+                assert "segment_data" in f, f"Failed to process dataset {task_args.dataset}"
+                assert "data" in f, f"Failed to process dataset {task_args.dataset}"
     else:
         main(args)
 

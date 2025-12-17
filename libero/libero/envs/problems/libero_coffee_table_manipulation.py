@@ -183,6 +183,7 @@ class Libero_Coffee_Table_Manipulation(BDDLBaseDomain):
                     )
 
     def _setup_camera(self, mujoco_arena):
+        super()._setup_camera(mujoco_arena)
         mujoco_arena.set_camera(
             camera_name="agentview", pos=[1.5, 0.0, 0.9], quat=[0.56, 0.43, 0.43, 0.56]
         )

@@ -73,14 +73,13 @@ from pathlib import Path
 import multiprocessing as mp
 import robosuite
 import robosuite.utils.transform_utils as T
-import robosuite.macros as macros
-from robosuite.environments.manipulation.empty_env import SingleArmEmptyEnv
 
-import libero.libero.utils.utils as libero_utils
 from PIL import Image
 from robosuite.utils import camera_utils
-from libero.libero.envs import *
-from libero.libero import get_libero_path
+from libero.libero.envs.env_wrapper import ControlEnv
+
+from diffusion_policy.common.libero_utils import get_env_details
+
 
 # Ensure safe multiprocessing and reduce thread oversubscription early
 try:
@@ -179,7 +178,7 @@ class VideoWriterManager:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper_only=False, min_len: int=40):
+def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper=False, pos=False, min_len: int=40, chunk_len: int=16):
     if noise == 0:
         return states, actions
     traj_len = actions.shape[0]
@@ -193,8 +192,12 @@ def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper
     else:
         gripper_index = []
     if len(gripper_index) > 0:
-        actions[noising_start:, gripper_index] = actions[noising_start:, gripper_index] * ((np.random.rand(traj_len - noising_start, len(gripper_index)) > noise).astype(np.float32) * 2 - 1)
-    gaussian_noise = np.random.normal(0, noise, actions.shape) if not gripper_only else np.zeros_like(actions)
+        if random.random() > 0.9 or gripper:
+            actions[noising_start:, gripper_index] = actions[noising_start:, gripper_index] * ((np.random.rand(traj_len - noising_start, len(gripper_index)) > noise).astype(np.float32) * 2 - 1)
+    gaussian_noise = np.random.normal(0, noise, (actions.shape[0] // chunk_len + 1, actions.shape[1]))
+    gaussian_noise = np.repeat(gaussian_noise, chunk_len, axis=0)[:actions.shape[0], :]
+    if pos:
+        gaussian_noise[:, 3:6] = 0.0
     actions[noising_start:] += gaussian_noise[noising_start:]
     action_low, action_high = env.action_spec
     actions = np.clip(actions, action_low, action_high)
@@ -211,9 +214,11 @@ def split_trajectory(args, states: np.ndarray, actions: np.ndarray):
     while start < states.shape[0]:
         end = min(start + traj_len, states.shape[0])
         if (args.eval and (end - start) < traj_len) or (not args.eval and (end - start) < 40):
+            start = max(0, end - traj_len)
+            splits.append((states[start:end], actions[start:end]))
             break ## only retain full traj_len segments for eval
         splits.append((states[start:end], actions[start:end]))
-        start += random.randint(20, 40) if not args.eval else (traj_len // 2) # 40 steps overlap, 8 frames
+        start += (random.randint(20, 40) if not args.eval else (traj_len // 2)) # 40 steps overlap, 8 frames
     return splits
 
 def playback_trajectory_with_env(
@@ -254,7 +259,6 @@ def playback_trajectory_with_env(
     if action_chunk is None:
         action_chunk = video_skip
 
-    empty_env.copy_env_model(env)
     # load the initial state
     ## this reset call doesn't seem necessary.
     ## seems ok to remove but haven't fully tested it.
@@ -299,7 +303,7 @@ def playback_trajectory_with_env(
                     video_img = obs[cam_name + "_image"][::-1]
                     video_writers[cam_name].append_data(video_img.copy())
                     if 'robot' not in cam_name:
-                        cam_transform = empty_env.get_camera_transform(camera_name=cam_name, camera_height=res, camera_width=res)
+                        cam_transform = empty_env.get_camera_info(env)[cam_name]['camera_transform']
                         pose_image = empty_env.plot_pose(cam_transform, height=res, width=res)
                         pose_video_writers[cam_name].append_data(pose_image.copy())
             video_count += 1
@@ -318,7 +322,7 @@ def playback_dataset(args):
     if args.video_path is None:
         # args.video_path = os.path.dirname(args.dataset)
         # Find the relative path of args.dataset to ./dataset
-        video_dir = args.dataset_dir + f"_std_{args.noise}" + f"_{args.res}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper_only else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
+        video_dir = args.dataset_dir + f"_std_{args.noise}" + f"_{args.res}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper else "") + (f"_pos" if args.pos else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
             + (f"_eval" if args.eval else "")
         rel_dataset_path = os.path.relpath(args.dataset, args.dataset_dir)
         rel_dataset_path = os.path.splitext(rel_dataset_path)[0]
@@ -329,51 +333,45 @@ def playback_dataset(args):
     assert not (args.render and write_video) # either on-screen or video but not both
 
 
-    env_name = f["data"].attrs["env_name"]
 
-    env_args = f["data"].attrs["env_args"]
-    env_kwargs = json.loads(env_args)["env_kwargs"]
-
-    problem_info = json.loads(f["data"].attrs["problem_info"])
-    problem_info["domain_name"]
-    problem_name = problem_info["problem_name"]
-    language_instruction = problem_info["language_instruction"]
 
     # list of all demonstrations episodes
     demos = list(f["data"].keys())
 
-    bddl_file_name = f["data"].attrs["bddl_file_name"]
-    libero_utils.update_env_kwargs(
-            env_kwargs,
-            bddl_file_name=bddl_file_name,
-            has_renderer=False,
-            has_offscreen_renderer=True,
-            ignore_done=True,
-            use_camera_obs=True,
-            camera_depths=False,
-            camera_names=args.render_image_names,
-            reward_shaping=True,
-            control_freq=20,
-            camera_heights=args.res,
-            camera_widths=args.res,
-            camera_segmentations=None,
-    )
-    env = OffScreenRenderEnv(
-        bddl_file_name=bddl_file_name,
-        camera_names=args.render_image_names,
-        camera_heights=args.res,
-        camera_widths=args.res,
-        ignore_done=True,
-        hard_reset=False,
-    ).env
+
+    env_kwargs = {
+        "bddl_file_name": args.env_meta['bddl_file_name'],
+        "camera_heights": args.res,
+        "camera_widths": args.res,
+        "camera_segmentations": None,
+        "ignore_done": True,
+        "hard_reset": False,
+        "use_camera_obs": True,
+        "has_offscreen_renderer": True,
+        "has_renderer": False,
+        "camera_names": args.render_image_names,
+    }
+    env = ControlEnv(**env_kwargs).env
+    env.reset()
+
     
-    empty_env_kwargs = env_kwargs.copy()
-    empty_env_kwargs['robots'] = [type(robot.robot_model).__name__ for robot in env.robots]
+    
+    empty_env_kwargs = args.env_meta['env_kwargs'].copy()
+    empty_env_kwargs['env_name'] = "SingleArmEmptyEnv"
     empty_env_kwargs['hard_reset'] = False
-    empty_env_kwargs['use_camera_obs'] = False
-    empty_env_kwargs['has_renderer'] = False
+    empty_env_kwargs['ignore_done'] = True
     empty_env_kwargs['has_offscreen_renderer'] = False
-    empty_env = SingleArmEmptyEnv(**empty_env_kwargs)
+    empty_env_kwargs['has_renderer'] = False
+    empty_env_kwargs['use_camera_obs'] = False
+    empty_env_kwargs['camera_names'] = args.render_image_names
+    empty_env_kwargs['camera_heights'] = args.res
+    empty_env_kwargs['camera_widths'] = args.res
+    empty_env_kwargs['robots'] = [type(robot.robot_model).__name__ for robot in env.robots]
+    empty_env = robosuite.make(**empty_env_kwargs)
+    empty_env.copy_env_model(env)
+
+    
+
 
 
     # list of all demonstration episodes (sorted in increasing number order)
@@ -422,7 +420,7 @@ def playback_dataset(args):
                     # context exit will finalize/cleanup writers
                     continue
 
-                noised_states, noised_actions = noise_fn(seg_states, seg_actions, args.noise, env, gripper_only=args.gripper_only, min_len=(80 if args.traj_len is None else None))
+                noised_states, noised_actions = noise_fn(seg_states, seg_actions, args.noise, env, gripper=args.gripper, pos=args.pos, min_len=(40 if args.traj_len is None else None))
 
                 print(f"Playing back seg{i} of episode: {ep} of env {rel_dataset_path} with length {len(noised_states)}", flush=True)
 
@@ -453,8 +451,21 @@ def playback_dataset(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--benchmark",
+        type=str,
+        default="libero_90",
+        help="benchmark name",
+    )
+    parser.add_argument(
+        "--task_indices",
+        type=str,
+        default="0",
+        help="task indices to visualize, e.g., '0', '0-4', '0,2,5', '0-2,4,6-8'",
+    )
+    parser.add_argument(
         "--dataset",
         type=str,
+        default=None,
         help="path to hdf5 dataset",
     )
     parser.add_argument(
@@ -505,7 +516,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video_skip",
         type=int,
-        default=5,
+        default=1,
         help="render frames to video every n steps",
     )
 
@@ -554,9 +565,14 @@ if __name__ == "__main__":
         help="(optional) number of steps between copying robot state from env to empty_env during"
     )
     parser.add_argument(
-        "--gripper-only",
+        "--gripper",
         action='store_true',
         help="if true, only add noise to gripper actions"
+    )
+    parser.add_argument(
+        "--pos",
+        action='store_true',
+        help="if true, only add noise to position actions"
     )
     parser.add_argument(
         "--traj-len",
@@ -574,16 +590,21 @@ if __name__ == "__main__":
     args.dataset_dir = "/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/DiffRL/libero_dataset/LIBERO/libero/datasets/libero_90"
     if args.action_chunk is None:
         args.action_chunk = args.video_skip
-    if not os.path.exists(args.dataset):
+
+    env_details = get_env_details(
+        benchmark_name=args.benchmark,
+        task_indices=args.task_indices,
+    )
+    if len(env_details["dataset_paths"]) > 1:
         import multiprocessing as mp
         tasks = []
-        for file in os.listdir(args.dataset_dir):
-            if file.endswith(".hdf5") and (args.dataset in file.lower() or args.dataset == "all"):
-                from copy import deepcopy
-                cur_args = deepcopy(args)
-                cur_args.dataset = os.path.join(args.dataset_dir, file)
-                cur_args.video_path = None
-                tasks.append(cur_args)
+        for i in range(len(env_details["dataset_paths"])):
+            from copy import deepcopy
+            cur_args = deepcopy(args)
+            cur_args.dataset = env_details["dataset_paths"][i]
+            cur_args.video_path = None
+            cur_args.env_meta = env_details["env_metas"][i]
+            tasks.append(cur_args)
 
         processes = []
         for task_args in tasks:
@@ -594,4 +615,6 @@ if __name__ == "__main__":
         for p in processes:
             p.join()
     else:
+        args.dataset = env_details["dataset_paths"][0]
+        args.env_meta = env_details["env_metas"][0]
         playback_dataset(args)
