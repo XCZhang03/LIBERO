@@ -16,6 +16,7 @@ try:
 except Exception as e:  # pragma: no cover
     imageio = None  # type: ignore
 
+REQUIRED_CAMERAS = ['canonical_frontview', 'birdview', 'robot0_eye_in_hand', 'sideview']
 
 def ensure_deps():
     missing = []
@@ -37,7 +38,7 @@ def discover_segments(dirpath: str) -> Dict[str, Dict[str, str]]:
         e.g., {'_seg1': {'agentview': 'agentview_seg1.mp4', ...}, '': {'agentview': 'agentview.mp4', ...}}
     """
     segments: Dict[str, Dict[str, str]] = defaultdict(dict)
-    required_cameras = ['agentview', 'birdview', 'frontview', 'sideview']
+    required_cameras = REQUIRED_CAMERAS
     
     for fname in os.listdir(dirpath):
         if not fname.lower().endswith(".mp4"):
@@ -63,6 +64,11 @@ def cap_info(paths: List[str]) -> Tuple[List[cv2.VideoCapture], List[Tuple[int, 
     sizes: List[Tuple[int, int]] = []
     fps_list: List[float] = []
     for p in paths:
+        if p is None:
+            caps.append(None)  # type: ignore
+            sizes.append((0, 0))
+            fps_list.append(0.0)
+            continue
         cap = cv2.VideoCapture(p)
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open video: {p}")
@@ -84,8 +90,8 @@ def even(x: int) -> int:
 def infer_tile_size_from_sizes(sizes: List[Tuple[int, int]]) -> Tuple[int, int]:
     if not sizes:
         return 256, 256
-    min_w = max(64, min(w for w, _ in sizes))
-    min_h = max(64, min(h for _, h in sizes))
+    min_w = max(64, min(w for w, _ in sizes if w > 0))
+    min_h = max(64, min(h for _, h in sizes if h > 0))
     return even(min_w), even(min_h)
 
 
@@ -111,7 +117,7 @@ def merge_four_to_grid(inputs: List[str], output: str, prefer_fps: Optional[floa
     try:
         tile_w, tile_h = infer_tile_size_from_sizes(sizes)
         out_h, out_w = tile_h * 2, tile_w * 2
-        fps = min(fps_list) if prefer_fps is None else prefer_fps
+        fps = min([f for f in fps_list if f > 1.0]) if prefer_fps is None else prefer_fps
 
         # Use imageio writer; try libx264 first, then fallback to mpeg4
         writer = None
@@ -125,6 +131,11 @@ def merge_four_to_grid(inputs: List[str], output: str, prefer_fps: Optional[floa
                 frames: List[np.ndarray] = []
                 ok_all = True
                 for cap in caps:
+                    # if cap is None:
+                    #     assert sum([1 for cap in caps if cap is None]) == 1 # only one can be None
+                    #     # Create black frame
+                    #     frames.append(np.zeros((tile_h, tile_w, 3), dtype=np.uint8))
+                    #     continue
                     ok, frame = cap.read()
                     if not ok:
                         ok_all = False
@@ -147,10 +158,11 @@ def merge_four_to_grid(inputs: List[str], output: str, prefer_fps: Optional[floa
                 frame_idx += 1
                 if frame_idx % 200 == 0:
                     print(f"  wrote {frame_idx} frames -> {output}")
-        print(f"[ok] {output} (frames={frame_idx}, size={out_w}x{out_h}, fps={fps:.2f})")
+        # print(f"[ok] {output} (frames={frame_idx}, size={out_h}x{out_w}, fps={fps:.2f})")
     finally:
         for cap in caps:
-            cap.release()
+            if cap is not None:
+                cap.release()
 
 
 def merge_in_directory(dirpath: str, overwrite: bool) -> None:
@@ -165,16 +177,18 @@ def merge_in_directory(dirpath: str, overwrite: bool) -> None:
         return
     
     # Required camera order
-    required_cameras = ['agentview', 'birdview', 'frontview', 'sideview']
+    required_cameras = REQUIRED_CAMERAS
     
     for suffix in sorted(segments.keys()):
         cameras = segments[suffix]
         
         # Check if all 4 required cameras exist
         if not all(cam in cameras for cam in required_cameras):
-            missing = [cam for cam in required_cameras if cam not in cameras]
-            print(f"[skip] Suffix '{suffix}' in {dirpath} missing cameras: {missing}")
-            continue
+            # missing = [cam for cam in required_cameras if cam not in cameras]
+            # if (not missing == ['robot0_eye_in_hand']) or (not "pose" in suffix):  # Special case skip message
+            #     print(f"[skip] Suffix '{suffix}' in {dirpath} missing cameras: {missing}")
+            #     continue
+            raise RuntimeError(f"Suffix '{suffix}' in {dirpath} missing required cameras.")
         
         # Prepare inputs in the specified order
         inputs = [cameras[cam] for cam in required_cameras]
@@ -185,7 +199,7 @@ def merge_in_directory(dirpath: str, overwrite: bool) -> None:
         if not overwrite and os.path.exists(output):
             print(f"[skip] Exists: {output}")
         else:
-            print(f"[merge] {dirpath} -> merged{suffix}.mp4 | cameras={required_cameras}")
+            # print(f"[merge] {dirpath} -> merged{suffix}.mp4 | cameras={required_cameras}")
             merge_four_to_grid(inputs, output)
 
 
@@ -195,7 +209,7 @@ def discover_eligible_directories(root: str) -> List[str]:
     A complete segment has all 4 camera views: agentview, birdview, frontview, sideview.
     """
     dirs: List[str] = []
-    required_cameras = ['agentview', 'birdview', 'frontview', 'sideview']
+    required_cameras = REQUIRED_CAMERAS
     
     for dirpath, dirnames, filenames in os.walk(root):
         base = os.path.basename(dirpath)

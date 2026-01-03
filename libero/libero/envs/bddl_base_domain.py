@@ -295,13 +295,16 @@ class BDDLBaseDomain(SingleArmEnv):
         )
         mujoco_arena.set_camera(
             camera_name="birdview",
-            pos=[0.01, 0.0, 2.1],
+            pos=[-0.05, 0.0, 2.1],
             quat=[0.7071, 0.0, 0.0, 0.7071],
         )
         mujoco_arena.set_camera(
             camera_name="sideview",
             pos=[-0.05651774593317116, 1.1761224129427358, 1.4879572214102434],
             quat=[0.009905065491771751, 0.006877963156909582, 0.5912228352893879, 0.806418094001364],
+        )
+        mujoco_arena.set_camera(
+            camera_name="canonical_frontview", pos=[0.9, 0.0, 1.1], quat=[0.52, 0.48, 0.48, 0.52],
         )
 
     def _load_model(self):

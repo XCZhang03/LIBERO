@@ -101,11 +101,10 @@ class VideoWriterManager:
     and atomic rename on close. Ensures corresponding pose and video files
     are finalized together and cleans up stale .tmp files.
     """
-    def __init__(self, video_dir, camera_names, seg_idx, res=128, fps=20):
+    def __init__(self, video_dir, camera_names, seg_idx, fps=20):
         self.video_dir = video_dir
         self.camera_names = camera_names
         self.seg_idx = seg_idx
-        self.res = res
         self.fps = fps
 
         self.video_writers = {}
@@ -122,29 +121,29 @@ class VideoWriterManager:
             camera_video_final = os.path.join(self.video_dir, f"{camera_name}_seg{self.seg_idx}.mp4")
             base, ext = os.path.splitext(camera_video_final)
             camera_video_tmp = f"{base}.tmp{ext}"  # ensure plugin sees .mp4 extension
+            
+            # if 'robot' not in camera_name:
+            pose_video_final = os.path.join(self.video_dir, f"{camera_name}_seg{self.seg_idx}_pose.mp4")
+            pbase, pext = os.path.splitext(pose_video_final)
+            pose_video_tmp = f"{pbase}.tmp{pext}"
+
             # Skip if final already exists (finals are only created on successful close)
-            if os.path.exists(camera_video_final):
+            if os.path.exists(camera_video_final) and os.path.exists(pose_video_final):
                 continue
             # Remove stale tmp if present
             if os.path.exists(camera_video_tmp):
                 os.remove(camera_video_tmp)
+            if os.path.exists(pose_video_tmp):
+                os.remove(pose_video_tmp)
+            
             # create writer to tmp file
             self.video_writers[camera_name] = imageio.get_writer(camera_video_tmp, fps=self.fps)
             self.video_tmp_paths[camera_name] = camera_video_tmp
             self.video_final_paths[camera_name] = camera_video_final
 
-            if 'robot' not in camera_name:
-                pose_video_final = os.path.join(self.video_dir, f"{camera_name}_seg{self.seg_idx}_pose.mp4")
-                pbase, pext = os.path.splitext(pose_video_final)
-                pose_video_tmp = f"{pbase}.tmp{pext}"
-                # Skip if final already exists
-                if os.path.exists(pose_video_final):
-                    continue
-                if os.path.exists(pose_video_tmp):
-                    os.remove(pose_video_tmp)
-                self.pose_video_writers[camera_name] = imageio.get_writer(pose_video_tmp, fps=self.fps)
-                self.pose_tmp_paths[camera_name] = pose_video_tmp
-                self.pose_final_paths[camera_name] = pose_video_final
+            self.pose_video_writers[camera_name] = imageio.get_writer(pose_video_tmp, fps=self.fps)
+            self.pose_tmp_paths[camera_name] = pose_video_tmp
+            self.pose_final_paths[camera_name] = pose_video_final
 
         return self
 
@@ -234,7 +233,6 @@ def playback_trajectory_with_env(
     action_chunk=None,
     camera_names=None,
     first=False,
-    res=128,
 ):
     """
     Helper function to playback a single trajectory using the simulator environment.
@@ -302,10 +300,16 @@ def playback_trajectory_with_env(
                 for cam_name in camera_names:
                     video_img = obs[cam_name + "_image"][::-1]
                     video_writers[cam_name].append_data(video_img.copy())
-                    if 'robot' not in cam_name:
-                        cam_transform = empty_env.get_camera_info(env)[cam_name]['camera_transform']
-                        pose_image = empty_env.plot_pose(cam_transform, height=res, width=res)
-                        pose_video_writers[cam_name].append_data(pose_image.copy())
+                    # if 'robot' not in cam_name:
+                    cam_info = empty_env.get_camera_info()[cam_name]
+                    height = cam_info['camera_height']
+                    width = cam_info['camera_width']
+                    cam_transform = cam_info['camera_transform']
+                    if "robot" in cam_name:
+                        pose_image = empty_env.plot_wrist_pose(cam_transform, height=height, width=width)
+                    else:
+                        pose_image = empty_env.plot_pose(cam_transform, height=height, width=width)
+                    pose_video_writers[cam_name].append_data(pose_image.copy())
             video_count += 1
             if video_count % action_chunk == 0:
                 empty_env.copy_robot_state(env)
@@ -322,7 +326,7 @@ def playback_dataset(args):
     if args.video_path is None:
         # args.video_path = os.path.dirname(args.dataset)
         # Find the relative path of args.dataset to ./dataset
-        video_dir = args.dataset_dir + f"_std_{args.noise}" + f"_{args.res}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper else "") + (f"_pos" if args.pos else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
+        video_dir = args.dataset_dir + f"_std_{args.noise}" + f"_{args.height}_{args.width}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper else "") + (f"_pos" if args.pos else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
             + (f"_eval" if args.eval else "")
         rel_dataset_path = os.path.relpath(args.dataset, args.dataset_dir)
         rel_dataset_path = os.path.splitext(rel_dataset_path)[0]
@@ -341,8 +345,6 @@ def playback_dataset(args):
 
     env_kwargs = {
         "bddl_file_name": args.env_meta['bddl_file_name'],
-        "camera_heights": args.res,
-        "camera_widths": args.res,
         "camera_segmentations": None,
         "ignore_done": True,
         "hard_reset": False,
@@ -350,6 +352,8 @@ def playback_dataset(args):
         "has_offscreen_renderer": True,
         "has_renderer": False,
         "camera_names": args.render_image_names,
+        "camera_heights": args.height,
+        "camera_widths": args.width,
     }
     env = ControlEnv(**env_kwargs).env
     env.reset()
@@ -364,8 +368,8 @@ def playback_dataset(args):
     empty_env_kwargs['has_renderer'] = False
     empty_env_kwargs['use_camera_obs'] = False
     empty_env_kwargs['camera_names'] = args.render_image_names
-    empty_env_kwargs['camera_heights'] = args.res
-    empty_env_kwargs['camera_widths'] = args.res
+    empty_env_kwargs['camera_heights'] = args.height
+    empty_env_kwargs['camera_widths'] = args.width
     empty_env_kwargs['robots'] = [type(robot.robot_model).__name__ for robot in env.robots]
     empty_env = robosuite.make(**empty_env_kwargs)
     empty_env.copy_env_model(env)
@@ -411,7 +415,7 @@ def playback_dataset(args):
 
         for i, (seg_states, seg_actions) in enumerate(split_trajectory(args, states, actions)):
             # Use the VideoWriterManager to encapsulate writer lifecycle and atomic moves
-            with VideoWriterManager(video_dir, args.render_image_names, i, res=args.res, fps=20) as vwm:
+            with VideoWriterManager(video_dir, args.render_image_names, i) as vwm:
                 video_writers = vwm.video_writers
                 pose_video_writers = vwm.pose_video_writers
 
@@ -437,7 +441,6 @@ def playback_dataset(args):
                     video_skip=args.video_skip,
                     camera_names=camera_names,
                     first=args.first,
-                    res=args.res,
                     action_chunk=args.action_chunk,
                 )
                 # context manager __exit__ will finalize and cleanup
@@ -525,7 +528,7 @@ if __name__ == "__main__":
         "--render_image_names",
         type=str,
         nargs='+',
-        default=['agentview', 'frontview', 'sideview', 'birdview'],
+        default=['canonical_frontview', 'birdview', 'robot0_eye_in_hand', 'sideview'],
         help="(optional) camera name(s) / image observation(s) to use for rendering on-screen or to video. Default is"
              "None, which corresponds to a predefined camera for each env type",
     )
@@ -553,9 +556,15 @@ if __name__ == "__main__":
         help="(optional) noise level to add to actions"
     )
     parser.add_argument(
-        "--res",
+        "--height",
         type=int,
-        default=128,
+        default=192,
+        help="The resolution of created videos"
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=320,
         help="The resolution of created videos"
     )
     parser.add_argument(
