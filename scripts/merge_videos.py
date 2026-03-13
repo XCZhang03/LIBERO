@@ -16,7 +16,7 @@ try:
 except Exception as e:  # pragma: no cover
     imageio = None  # type: ignore
 
-REQUIRED_CAMERAS = ['canonical_frontview', 'birdview', 'robot0_eye_in_hand', 'sideview']
+REQUIRED_CAMERAS = ['agentview', 'birdview', 'robot0_eye_in_hand', 'sideview']
 
 def ensure_deps():
     missing = []
@@ -41,7 +41,7 @@ def discover_segments(dirpath: str) -> Dict[str, Dict[str, str]]:
     required_cameras = REQUIRED_CAMERAS
     
     for fname in os.listdir(dirpath):
-        if not fname.lower().endswith(".mp4"):
+        if not fname.lower().endswith(".mp4") or "tmp" in fname.lower():
             continue
         if "merged" in fname.lower():
             continue

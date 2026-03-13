@@ -217,3 +217,10 @@ class Libero_Kitchen_Tabletop_Manipulation(BDDLBaseDomain):
             pos=[2.1, 0.535, 2.075],
             quat=[0.513, 0.353, 0.443, 0.645],
         )
+
+        if "kitchen_scene6" in str(self.bddl_file_name).lower():
+            mujoco_arena.set_camera(
+                camera_name="sideview",
+                pos=[-0.05651774593317116, -1.2761224129427358, 1.4879572214102434],
+                quat=[0.8064, 0.5912, 0.0068, 0.0099],
+            )

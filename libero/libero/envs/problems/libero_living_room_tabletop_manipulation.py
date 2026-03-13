@@ -139,8 +139,12 @@ class Libero_Living_Room_Tabletop_Manipulation(BDDLBaseDomain):
         """
         goal_state = self.parsed_problem["goal_state"]
         result = True
+        # num_success = 0
         for state in goal_state:
             result = self._eval_predicate(state) and result
+            # if self._eval_predicate(state):
+            #     num_success += 1
+        # return result, num_success
         return result
 
     def _eval_predicate(self, state):

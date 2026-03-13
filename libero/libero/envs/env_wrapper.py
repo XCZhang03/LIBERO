@@ -52,6 +52,14 @@ class ControlEnv:
         problem_info = BDDLUtils.get_problem_info(bddl_file_name)
         # Check if we're using a multi-armed environment and use env_configuration argument if so
 
+        self.env_kwargs = dict(
+            bddl_file_name=str(bddl_file_name),
+            robots=robots,
+            controller_configs=controller_configs,
+            ignore_done=ignore_done,
+            control_freq=control_freq,
+        )
+
         # Create environment
         self.problem_name = problem_info["problem_name"]
         self.domain_name = problem_info["domain_name"]

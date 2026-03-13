@@ -177,9 +177,13 @@ class VideoWriterManager:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper=False, pos=False, chunk_len: int=10, hist_len: int=30):
+def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper=False, pos=False, min_len: int=40, chunk_len: int=16):
     if noise == 0:
         return states, actions
+    traj_len = actions.shape[0]
+    if min_len is None:
+        min_len = traj_len
+    noising_start=np.random.choice(traj_len - min_len) if traj_len > min_len else 0 # at least 8 frames (40 steps)
     if actions.shape[-1] == 14:
         gripper_index = [6, 13]
     elif actions.shape[-1] == 7:
@@ -188,35 +192,30 @@ def noise_fn(states: np.ndarray, actions: np.ndarray, noise: float, env, gripper
         gripper_index = []
     if len(gripper_index) > 0:
         if random.random() > 0.9 or gripper:
-            actions[:, gripper_index] = actions[:, gripper_index] * ((np.random.rand(actions.shape[0], len(gripper_index)) > noise).astype(np.float32) * 2 - 1)
+            actions[noising_start:, gripper_index] = actions[noising_start:, gripper_index] * ((np.random.rand(traj_len - noising_start, len(gripper_index)) > noise).astype(np.float32) * 2 - 1)
     gaussian_noise = np.random.normal(0, noise, (actions.shape[0] // chunk_len + 1, actions.shape[1]))
     gaussian_noise = np.repeat(gaussian_noise, chunk_len, axis=0)[:actions.shape[0], :]
     if pos:
         gaussian_noise[:, 3:6] = 0.0
-        # clip the z position noise between -0.2 and 0.2, and randomly set z noise to 0 with 50% chance
-        gaussian_noise[:, 2] = np.clip(gaussian_noise[:, 2], -0.1, 0.1)
-        gaussian_noise[:, 2] = np.where(np.random.rand(gaussian_noise.shape[0] // chunk_len + 1).repeat(chunk_len)[:gaussian_noise.shape[0]] > 0.5, gaussian_noise[:, 2], 0.0)
-    if hist_len is not None and random.random() > 0.5:
-        hist_len = np.random.randint(hist_len - 20, hist_len + 20)
-        gaussian_noise[:hist_len] = 0.0
-    actions += gaussian_noise
+    actions[noising_start:] += gaussian_noise[noising_start:]
     action_low, action_high = env.action_spec
     actions = np.clip(actions, action_low, action_high)
+    actions = actions[noising_start:]
+    states = states[noising_start:]
     return states, actions
 
-def split_trajectory(args, states: np.ndarray, actions: np.ndarray):
+def split_trajectory(args, states: np.ndarray, actions: np.ndarray, hist_len: int=20):
     traj_len = args.traj_len
-    hist_len = args.hist_len
     if traj_len is None or traj_len == -1:
         return [(states, actions)]
     splits = []
     start = 0
     while start < states.shape[0]:
         end = min(start + traj_len, states.shape[0])
-        if (end - start) < traj_len:
+        if (args.eval and (end - start) < traj_len) or (not args.eval and (end - start) < 40):
             start = max(0, end - traj_len)
             splits.append((states[start:end], actions[start:end]))
-            break 
+            break ## only retain full traj_len segments for eval
         splits.append((states[start:end], actions[start:end]))
         start += (traj_len - hist_len // 2 - np.random.randint(0, hist_len))
     return splits
@@ -268,7 +267,7 @@ def playback_trajectory_with_env(
     empty_env.copy_robot_state(env)
 
     low_dim_obs = {
-        "panel_order": ['agentview', 'birdview', 'robot0_eye_in_hand', 'sideview'],
+        "panel_order": ['canonical_frontview', 'birdview', 'robot0_eye_in_hand', 'sideview'],
         "actions": [],
         "states": [],
         "ee_states": [],
@@ -346,8 +345,8 @@ def playback_dataset(args):
     if args.video_path is None:
         # args.video_path = os.path.dirname(args.dataset)
         # Find the relative path of args.dataset to ./dataset
-        video_dir = args.dataset_dir + f"_replay/" + f"args_std_{args.noise}" + f"_{args.height}_{args.width}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper else "") + (f"_pos" if args.pos else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
-            + (f"_hist{args.hist_len}" if args.hist_len is not None else "")
+        video_dir = args.dataset_dir + "_replay/" + f"args_std_{args.noise}" + f"_{args.height}_{args.width}" + f"_chunk{args.action_chunk}" + (f"_gripper" if args.gripper else "") + (f"_pos" if args.pos else "") + (f"_len{args.traj_len}" if args.traj_len is not None else "") \
+            + (f"_eval" if args.eval else "")
         rel_dataset_path = os.path.relpath(args.dataset, args.dataset_dir)
         rel_dataset_path = os.path.splitext(rel_dataset_path)[0]
         print(f"Relative dataset path: {rel_dataset_path}")
@@ -358,10 +357,12 @@ def playback_dataset(args):
 
     # list of all demonstrations episodes
     demos = list(f["data"].keys())
-
+    import json
+    env_meta = json.loads(f['data'].attrs['env_args'])
+    env_kwargs = env_meta['env_kwargs'].copy()
 
     env_kwargs = {
-        "bddl_file_name": args.env_meta['bddl_file_name'],
+        "bddl_file_name": env_kwargs['bddl_file_name'],
         "camera_segmentations": None,
         "ignore_done": True,
         "hard_reset": False,
@@ -375,9 +376,8 @@ def playback_dataset(args):
     env = ControlEnv(**env_kwargs).env
     env.reset()
 
-    
-    
-    empty_env_kwargs = args.env_meta['env_kwargs'].copy()
+
+    empty_env_kwargs = env_meta['env_kwargs'].copy()
     empty_env_kwargs['env_name'] = "SingleArmEmptyEnv"
     empty_env_kwargs['hard_reset'] = False
     empty_env_kwargs['ignore_done'] = True
@@ -390,9 +390,6 @@ def playback_dataset(args):
     empty_env_kwargs['robots'] = [type(robot.robot_model).__name__ for robot in env.robots]
     empty_env = robosuite.make(**empty_env_kwargs)
     empty_env.copy_env_model(env)
-
-    
-
 
 
     # list of all demonstration episodes (sorted in increasing number order)
@@ -438,9 +435,8 @@ def playback_dataset(args):
                     # context exit will finalize/cleanup writers
                     continue
 
-                noised_states, noised_actions = noise_fn(seg_states, seg_actions, args.noise, env, gripper=args.gripper, pos=args.pos, hist_len=args.hist_len)
-                if len(noised_states) == 0:
-                    continue
+                noised_states, noised_actions = noise_fn(seg_states, seg_actions, args.noise, env, gripper=args.gripper, pos=args.pos, min_len=(40 if args.traj_len is None else None))
+
                 print(f"Playing back seg{i} of episode: {ep} of env {rel_dataset_path} with length {len(noised_states)}", flush=True)
 
                 initial_state = noised_states[0]
@@ -459,7 +455,8 @@ def playback_dataset(args):
                     action_chunk=args.action_chunk,
                 )
                 low_dim_obs = {k: np.array(v) for k, v in low_dim_obs.items()}
-                low_dim_obs['bddl_file_name'] = str(args.env_meta['bddl_file_name'])
+                low_dim_obs['bddl_file_name'] = str(env_kwargs['bddl_file_name'])
+                low_dim_obs['env_kwargs'] = env_kwargs
                 np.savez_compressed(
                     os.path.join(video_dir, f"low_dim_seg{i}.npz"),
                     **low_dim_obs,
@@ -477,7 +474,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--benchmark",
         type=str,
-        default="libero_90",
+        default="libero_10",
         help="benchmark name",
     )
     parser.add_argument(
@@ -579,13 +576,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--height",
         type=int,
-        default=224,
+        default=128,
         help="The resolution of created videos"
     )
     parser.add_argument(
         "--width",
         type=int,
-        default=224,
+        default=128,
         help="The resolution of created videos"
     )
     parser.add_argument(
@@ -611,31 +608,25 @@ if __name__ == "__main__":
         help="(optional) if provided, only playback random traj_len steps of each trajectory"
     )
     parser.add_argument(
-        "--hist-len",
-        type=int,
-        default=20,
-        help="(optional) if traj-len is provided, number of historical steps to retain at the beginning of each split trajectory segment"
+        "--eval",
+        action='store_true',
+        help="if true, generate eval videos, maximizing length"
     )
-
 
     args = parser.parse_args()
-    args.dataset_dir = f"/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/DiffRL/libero_dataset/LIBERO/libero/datasets/{args.benchmark}"
+    args.dataset_dir = f"/n/holylabs/ydu_lab/Lab/zhangxiangcheng/code/SAILOR/scratch_dir/pi_data/rollout_data_libero10_train-libero90_28k_chunk40/{args.benchmark}"
     if args.action_chunk is None:
         args.action_chunk = args.video_skip
-
-    env_details = get_env_details(
-        benchmark_name=args.benchmark,
-        task_indices=args.task_indices,
-    )
-    if len(env_details["dataset_paths"]) > 1:
+    if args.dataset == "all":
         import multiprocessing as mp
         tasks = []
-        for i in range(len(env_details["dataset_paths"])):
+        dataset_paths = Path(args.dataset_dir).rglob("*.hdf5")
+        dataset_paths = [str(p) for p in dataset_paths]
+        for i in range(len(dataset_paths)):
             from copy import deepcopy
             cur_args = deepcopy(args)
-            cur_args.dataset = env_details["dataset_paths"][i]
+            cur_args.dataset = dataset_paths[i]
             cur_args.video_path = None
-            cur_args.env_meta = env_details["env_metas"][i]
             tasks.append(cur_args)
 
         processes = []
@@ -647,6 +638,4 @@ if __name__ == "__main__":
         for p in processes:
             p.join()
     else:
-        args.dataset = env_details["dataset_paths"][0]
-        args.env_meta = env_details["env_metas"][0]
         playback_dataset(args)
