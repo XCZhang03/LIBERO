@@ -95,6 +95,7 @@ try:
 except Exception:
     pass
 
+LIBERO_DUMMY_ACTION = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0])
 
 class VideoWriterManager:
     """Context manager to handle imageio video writers using temporary files
@@ -422,6 +423,10 @@ def playback_dataset(args):
         # if args.use_actions:
         # always use actions
         actions = f["data/{}/actions".format(ep)][()]
+
+        # pad zero actions at the beginning
+        states = np.array([states[0]] * 60 + list(states))
+        actions = np.array([LIBERO_DUMMY_ACTION] * 60 + list(actions))
         # Dump states and actions for this episode
         print("ep len:", states.shape[0])
         with open(os.path.join(video_dir, "args.json"), "w") as f_args:

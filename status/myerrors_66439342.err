@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/DiffRL/libero_dataset/LIBERO/benchmark_scripts/download_libero_datasets.py", line 66, in <module>
+    main()
+  File "/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/DiffRL/libero_dataset/LIBERO/benchmark_scripts/download_libero_datasets.py", line 44, in main
+    input_str = input("Download from original links may lead to failures. Do you want to continue? (y/n): ")
+EOFError: EOF when reading a line

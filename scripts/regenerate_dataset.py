@@ -147,6 +147,8 @@ def main(args):
     new_data_path = os.path.join(args.libero_target_dir, f"{task.name}_demo.hdf5")
     new_data_file = h5py.File(new_data_path, "w")
     grp = new_data_file.create_group("data")
+    if "env_args" in orig_data.attrs:
+        grp.attrs["env_args"] = orig_data.attrs["env_args"]
 
     for i in tqdm.tqdm(range(len(orig_data.keys()))):
         # Get demo data
@@ -214,6 +216,7 @@ def main(args):
 
         # At end of episode, save replayed trajectories to new HDF5 files (only keep successes)
         if done:
+            print(f"Successfully replayed episode {i} for task '{task_id}'! Saving to new dataset...")
             dones = np.zeros(len(actions)).astype(np.uint8)
             dones[-1] = 1
             rewards = np.zeros(len(actions)).astype(np.uint8)
@@ -262,6 +265,10 @@ def main(args):
         # Report total number of no-op actions filtered out so far
         print(f"  Total # no-op actions filtered out: {num_noops}")
 
+        if args.n is not None and num_success >= args.n:
+            print(f"Reached specified number of replays ({args.n}). Stopping regeneration for this task.")
+            break
+
     # Close HDF5 files
     orig_data_file.close()
     new_data_file.close()
@@ -276,17 +283,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--libero_task_suite", type=str, choices=["libero_spatial", "libero_object", "libero_goal", "libero_10", "libero_90"],
                         help="LIBERO task suite. Example: libero_spatial", 
-                        default="libero_90"
+                        default="libero_object"
                         )
     parser.add_argument("--libero_raw_data_dir", type=str,
                         help="Path to directory containing raw HDF5 dataset. Example: ./LIBERO/libero/datasets/libero_spatial", 
-                        default="./libero/datasets/libero_90")
+                        default="./libero/datasets/libero_object")
     parser.add_argument("--libero_target_dir", type=str,
                         help="Path to regenerated dataset directory. Example: ./libero/datasets/libero_90_no_noops", 
-                        default="./libero/datasets/libero_90_no_noops")
+                        default="./libero/datasets/libero_object_no_noops")
     parser.add_argument("--task_id", type=str,
                         help="Task ID in the task suite to regenerate dataset for. Example: 0",
-                        default="0")
+                        default="0-9")
+    parser.add_argument("--n", type=int,
+                        help="Number of demos to replay",
+                        default=None)
     args = parser.parse_args()
 
     from diffusion_policy.common.libero_utils import parse_task_indices

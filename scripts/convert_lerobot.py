@@ -28,12 +28,12 @@ import os
 import numpy as np
 import tqdm
 
-NUM_EPS = 10
-REPO_NAME = f"XCZhang/libero_demo{NUM_EPS}"  # Name of the output dataset, also used for the Hugging Face Hub
+NUM_EPS = 20
+REPO_NAME = f"XCZhang/libero_object_20demos"  # Name of the output dataset, also used for the Hugging Face Hub
 
-RAW_DATASET_DIR = "/n/holylabs/ydu_lab/Lab/zhangxiangcheng/code/SAILOR/env_repos/LIBERO/libero/datasets/libero_90_no_noops"
+RAW_DATASET_DIR = "/net/holy-isilon/ifs/rc_labs/ydu_lab/xczhang/workspace/SAILOR/env_repos/LIBERO/libero/datasets/libero_object_no_noops"
 
-def main(data_dir: str=RAW_DATASET_DIR, *, push_to_hub: bool = True):
+def main(data_dir: str=RAW_DATASET_DIR, *, push_to_hub: bool = False):
     # Clean up any existing dataset in the output directory
     output_path = HF_LEROBOT_HOME / REPO_NAME
     if output_path.exists():
